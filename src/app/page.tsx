@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { markdownToHtml } from '@/lib/markdown-to-html';
 
 interface PassageInput {
@@ -17,6 +17,45 @@ interface AnalysisResult {
   error?: string;
 }
 
+interface MonthlyUsage {
+  month: string; // YYYY-MM
+  inputTokens: number;
+  outputTokens: number;
+}
+
+// Gemini 2.0 Flash pricing (USD per 1M tokens)
+const INPUT_PRICE_PER_M = 0.10;
+const OUTPUT_PRICE_PER_M = 0.40;
+const USD_TO_KRW = 1450;
+
+function getMonthKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function getUsage(): MonthlyUsage {
+  const key = `usage-${getMonthKey()}`;
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored) return JSON.parse(stored);
+  } catch {}
+  return { month: getMonthKey(), inputTokens: 0, outputTokens: 0 };
+}
+
+function addUsage(inputTokens: number, outputTokens: number) {
+  const usage = getUsage();
+  usage.inputTokens += inputTokens;
+  usage.outputTokens += outputTokens;
+  localStorage.setItem(`usage-${getMonthKey()}`, JSON.stringify(usage));
+  return usage;
+}
+
+function calcCostKRW(usage: MonthlyUsage) {
+  const inputCostUSD = (usage.inputTokens / 1_000_000) * INPUT_PRICE_PER_M;
+  const outputCostUSD = (usage.outputTokens / 1_000_000) * OUTPUT_PRICE_PER_M;
+  return Math.round((inputCostUSD + outputCostUSD) * USD_TO_KRW);
+}
+
 export default function Home() {
   const [passages, setPassages] = useState<PassageInput[]>([
     { id: 1, textbook: '', number: '', text: '' },
@@ -24,6 +63,11 @@ export default function Home() {
   const [results, setResults] = useState<AnalysisResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState<number | null>(null);
+  const [usage, setUsage] = useState<MonthlyUsage>({ month: '', inputTokens: 0, outputTokens: 0 });
+
+  useEffect(() => {
+    setUsage(getUsage());
+  }, []);
 
   const addPassage = () => {
     setPassages((prev) => [
@@ -68,6 +112,12 @@ export default function Home() {
         html: markdownToHtml(r.markdown),
       }));
       setResults(mapped);
+
+      // Track usage
+      if (data.usage) {
+        const updated = addUsage(data.usage.inputTokens, data.usage.outputTokens);
+        setUsage(updated);
+      }
     } catch (e) {
       alert('분석 중 오류가 발생했습니다: ' + (e instanceof Error ? e.message : e));
     } finally {
@@ -75,7 +125,7 @@ export default function Home() {
     }
   };
 
-  const copyToClipboard = async (index: number) => {
+  const copyToClipboard = useCallback(async (index: number) => {
     const el = document.getElementById(`result-${index}`);
     if (!el) return;
 
@@ -102,7 +152,7 @@ export default function Home() {
       setCopied(index);
       setTimeout(() => setCopied(null), 2000);
     }
-  };
+  }, []);
 
   const copyAll = async () => {
     const container = document.getElementById('all-results');
@@ -133,11 +183,32 @@ export default function Home() {
     }
   };
 
+  const totalTokens = usage.inputTokens + usage.outputTokens;
+  const costKRW = calcCostKRW(usage);
+
   return (
     <div style={{ maxWidth: 900, margin: '0 auto', padding: 20 }}>
-      <h1 style={{ fontSize: 24, fontWeight: 'bold', marginBottom: 20 }}>
+      <h1 style={{ fontSize: 24, fontWeight: 'bold', marginBottom: 12 }}>
         네이버 블로그 영어 지문 분석기
       </h1>
+
+      {/* Token Usage Dashboard */}
+      <div style={{
+        display: 'flex',
+        gap: 16,
+        marginBottom: 20,
+        padding: '12px 16px',
+        background: '#f0f4ff',
+        borderRadius: 8,
+        fontSize: 14,
+        flexWrap: 'wrap',
+      }}>
+        <span style={{ fontWeight: 'bold' }}>{usage.month || '---'} 사용량</span>
+        <span>입력: <b>{usage.inputTokens.toLocaleString()}</b> 토큰</span>
+        <span>출력: <b>{usage.outputTokens.toLocaleString()}</b> 토큰</span>
+        <span>합계: <b>{totalTokens.toLocaleString()}</b> 토큰</span>
+        <span style={{ color: '#2563eb', fontWeight: 'bold' }}>비용: ₩{costKRW.toLocaleString()}</span>
+      </div>
 
       {passages.map((p, idx) => (
         <div
