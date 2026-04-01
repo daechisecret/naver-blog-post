@@ -227,30 +227,15 @@ export default function Home() {
 
           <div id="all-results">
             {results.map((r) => (
-              <div key={r.index} style={{ marginBottom: 12, border: '1px solid #e5e5e5', borderRadius: 8 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', cursor: 'pointer', background: '#f9f9f9', borderRadius: 8 }}>
-                  <details style={{ width: '100%' }}>
-                    <summary style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', fontWeight: 'bold' }}>
-                      <span>
-                        지문 {r.index + 1}
-                        {passages[r.index]?.textbook && ` - ${passages[r.index].textbook}`}
-                        {passages[r.index]?.number && ` ${passages[r.index].number}`}
-                      </span>
-                    </summary>
-                    {r.error ? (
-                      <div style={{ color: 'red', padding: '12px 0' }}>오류: {r.error}</div>
-                    ) : (
-                      <div
-                        style={{
-                          padding: '16px 0',
-                          lineHeight: 1.8,
-                        }}
-                        dangerouslySetInnerHTML={{ __html: r.html }}
-                      />
-                    )}
-                  </details>
+              <div key={r.index} style={{ marginBottom: 12, border: '1px solid #e5e5e5', borderRadius: 8, overflow: 'hidden' }}>
+                <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', background: '#f9f9f9' }}>
+                  <span style={{ fontWeight: 'bold', flex: 1 }}>
+                    지문 {r.index + 1}
+                    {passages[r.index]?.textbook && ` - ${passages[r.index].textbook}`}
+                    {passages[r.index]?.number && ` ${passages[r.index].number}`}
+                  </span>
                   <button
-                    onClick={(e) => { e.stopPropagation(); copyToClipboard(r.index); }}
+                    onClick={() => copyToClipboard(r.index)}
                     style={{
                       padding: '4px 12px',
                       background: copied === r.index ? '#22c55e' : '#666',
@@ -259,12 +244,40 @@ export default function Home() {
                       borderRadius: 4,
                       cursor: 'pointer',
                       fontSize: 13,
+                      marginRight: 8,
                       flexShrink: 0,
                     }}
                   >
                     {copied === r.index ? '복사됨!' : '복사'}
                   </button>
+                  <button
+                    onClick={() => {
+                      const el = document.getElementById(`detail-${r.index}`);
+                      if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+                    }}
+                    style={{
+                      padding: '4px 12px',
+                      background: '#333',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      fontSize: 13,
+                      flexShrink: 0,
+                    }}
+                  >
+                    펼치기/접기
+                  </button>
                 </div>
+                {r.error ? (
+                  <div style={{ color: 'red', padding: '12px 16px' }}>오류: {r.error}</div>
+                ) : (
+                  <div
+                    id={`detail-${r.index}`}
+                    style={{ display: 'none', padding: '16px', lineHeight: 1.8 }}
+                    dangerouslySetInnerHTML={{ __html: r.html }}
+                  />
+                )}
                 {/* Hidden div for clipboard copy even when collapsed */}
                 <div
                   id={`result-${r.index}`}
