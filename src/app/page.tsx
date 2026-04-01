@@ -227,15 +227,30 @@ export default function Home() {
 
           <div id="all-results">
             {results.map((r) => (
-              <div key={r.index} style={{ marginBottom: 24 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <span style={{ fontWeight: 'bold' }}>
-                    지문 {r.index + 1}
-                    {passages[r.index]?.textbook && ` - ${passages[r.index].textbook}`}
-                    {passages[r.index]?.number && ` ${passages[r.index].number}`}
-                  </span>
+              <div key={r.index} style={{ marginBottom: 12, border: '1px solid #e5e5e5', borderRadius: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', cursor: 'pointer', background: '#f9f9f9', borderRadius: 8 }}>
+                  <details style={{ width: '100%' }}>
+                    <summary style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', fontWeight: 'bold' }}>
+                      <span>
+                        지문 {r.index + 1}
+                        {passages[r.index]?.textbook && ` - ${passages[r.index].textbook}`}
+                        {passages[r.index]?.number && ` ${passages[r.index].number}`}
+                      </span>
+                    </summary>
+                    {r.error ? (
+                      <div style={{ color: 'red', padding: '12px 0' }}>오류: {r.error}</div>
+                    ) : (
+                      <div
+                        style={{
+                          padding: '16px 0',
+                          lineHeight: 1.8,
+                        }}
+                        dangerouslySetInnerHTML={{ __html: r.html }}
+                      />
+                    )}
+                  </details>
                   <button
-                    onClick={() => copyToClipboard(r.index)}
+                    onClick={(e) => { e.stopPropagation(); copyToClipboard(r.index); }}
                     style={{
                       padding: '4px 12px',
                       background: copied === r.index ? '#22c55e' : '#666',
@@ -244,25 +259,18 @@ export default function Home() {
                       borderRadius: 4,
                       cursor: 'pointer',
                       fontSize: 13,
+                      flexShrink: 0,
                     }}
                   >
                     {copied === r.index ? '복사됨!' : '복사'}
                   </button>
                 </div>
-                {r.error ? (
-                  <div style={{ color: 'red' }}>오류: {r.error}</div>
-                ) : (
-                  <div
-                    id={`result-${r.index}`}
-                    style={{
-                      border: '1px solid #e5e5e5',
-                      padding: 20,
-                      borderRadius: 8,
-                      lineHeight: 1.8,
-                    }}
-                    dangerouslySetInnerHTML={{ __html: r.html }}
-                  />
-                )}
+                {/* Hidden div for clipboard copy even when collapsed */}
+                <div
+                  id={`result-${r.index}`}
+                  style={{ position: 'absolute', left: '-9999px' }}
+                  dangerouslySetInnerHTML={{ __html: r.html }}
+                />
               </div>
             ))}
           </div>
