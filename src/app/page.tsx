@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { markdownToHtml } from '@/lib/markdown-to-html';
+import { PresetStyle, PRESETS, COUNT_PRESETS, getLabels, isFixedStyle } from '@/lib/presets';
 
 interface PassageInput {
   id: number;
@@ -18,7 +19,7 @@ interface AnalysisResult {
 }
 
 interface MonthlyUsage {
-  month: string; // YYYY-MM
+  month: string;
   inputTokens: number;
   outputTokens: number;
 }
@@ -60,23 +61,77 @@ export default function Home() {
   const [passages, setPassages] = useState<PassageInput[]>([
     { id: 1, textbook: '', number: '', text: '' },
   ]);
+  const [presetStyle, setPresetStyle] = useState<PresetStyle>('none');
   const [results, setResults] = useState<AnalysisResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState<number | null>(null);
   const [usage, setUsage] = useState<MonthlyUsage>({ month: '', inputTokens: 0, outputTokens: 0 });
+  const [logs, setLogs] = useState<string[]>([]);
+  const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
 
   useEffect(() => {
     setUsage(getUsage());
   }, []);
 
+  const addLog = (msg: string) => {
+    const ts = new Date().toLocaleTimeString('ko-KR', { hour12: false });
+    setLogs((prev) => [...prev, `[${ts}] ${msg}`]);
+  };
+
+  // 지문 수 변경 시: 부족하면 추가, 넘치면 잘라냄. 스타일 라벨 자동 주입.
+  const resizePassages = (targetCount: number, style: PresetStyle = presetStyle) => {
+    const labels = getLabels(style, targetCount);
+    setPassages((prev) => {
+      const next: PassageInput[] = [];
+      for (let i = 0; i < targetCount; i++) {
+        const existing = prev[i];
+        next.push({
+          id: existing?.id ?? i + 1,
+          textbook: existing?.textbook ?? '',
+          number: style === 'none' ? (existing?.number ?? '') : labels[i] ?? '',
+          text: existing?.text ?? '',
+        });
+      }
+      return next;
+    });
+  };
+
+  const applyPresetStyle = (style: PresetStyle) => {
+    setPresetStyle(style);
+    const preset = PRESETS[style];
+    const targetCount = preset.fixedCount ?? passages.length;
+    resizePassages(targetCount, style);
+  };
+
+  const applyCountPreset = (count: number) => {
+    // 고정 스타일이면 개수 변경 불가 → none으로 먼저 되돌림
+    if (isFixedStyle(presetStyle)) {
+      setPresetStyle('none');
+      resizePassages(count, 'none');
+    } else {
+      resizePassages(count, presetStyle);
+    }
+  };
+
   const addPassage = () => {
-    setPassages((prev) => [
-      ...prev,
-      { id: prev.length + 1, textbook: '', number: '', text: '' },
-    ]);
+    if (isFixedStyle(presetStyle)) return;
+    setPassages((prev) => {
+      const newIdx = prev.length;
+      const labels = getLabels(presetStyle, newIdx + 1);
+      return [
+        ...prev,
+        {
+          id: newIdx + 1,
+          textbook: '',
+          number: presetStyle === 'none' ? '' : labels[newIdx] ?? '',
+          text: '',
+        },
+      ];
+    });
   };
 
   const removePassage = (id: number) => {
+    if (isFixedStyle(presetStyle)) return;
     if (passages.length <= 1) return;
     setPassages((prev) => prev.filter((p) => p.id !== id));
   };
@@ -88,41 +143,73 @@ export default function Home() {
   };
 
   const analyze = async () => {
+    const valid = passages.filter((p) => p.text.trim());
+    if (valid.length === 0) {
+      alert('지문을 하나 이상 입력해주세요.');
+      return;
+    }
+
     setLoading(true);
     setResults([]);
-    try {
-      const res = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          passages: passages.map((p) => ({
-            text: p.text,
+    setLogs([]);
+    setProgress({ done: 0, total: valid.length });
+    addLog(`🚀 분석 시작 — 지문 ${valid.length}개 (순차 처리, 429 방지)`);
+
+    const resultsArr: AnalysisResult[] = new Array(valid.length);
+    let totalInput = 0;
+    let totalOutput = 0;
+
+    // 지문 1개씩 순차 처리 — Dynamic Shared Quota 스파이크 완전 회피
+    for (let i = 0; i < valid.length; i++) {
+      const p = valid[i];
+      const label = (p.textbook || p.number) ? `${p.textbook || ''} ${p.number || ''}`.trim() : `지문 ${i + 1}`;
+      addLog(`📝 [${i + 1}/${valid.length}] ${label} 분석 시작...`);
+      const startTime = Date.now();
+
+      try {
+        const res = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            passage: p.text,
             textbook: p.textbook,
             number: p.number,
-          })),
-        }),
-      });
-      const data = await res.json();
-      if (data.error) {
-        alert(data.error);
-        return;
-      }
-      const mapped = data.results.map((r: { index: number; markdown: string; error?: string }) => ({
-        ...r,
-        html: markdownToHtml(r.markdown),
-      }));
-      setResults(mapped);
+          }),
+        });
+        const data = await res.json();
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
-      // Track usage
-      if (data.usage) {
-        const updated = addUsage(data.usage.inputTokens, data.usage.outputTokens);
-        setUsage(updated);
+        if (data.error) {
+          addLog(`❌ [${i + 1}/${valid.length}] ${label} 실패 (${elapsed}s): ${String(data.error).slice(0, 100)}`);
+          resultsArr[i] = { index: i, markdown: '', html: '', error: data.error };
+        } else {
+          const tokens = (data.inputTokens || 0) + (data.outputTokens || 0);
+          addLog(`✅ [${i + 1}/${valid.length}] ${label} 완료 (${elapsed}s, ${tokens.toLocaleString()} 토큰)`);
+          resultsArr[i] = {
+            index: i,
+            markdown: data.markdown,
+            html: markdownToHtml(data.markdown),
+          };
+          totalInput += data.inputTokens || 0;
+          totalOutput += data.outputTokens || 0;
+        }
+      } catch (e) {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        const msg = e instanceof Error ? e.message : 'Unknown';
+        addLog(`❌ [${i + 1}/${valid.length}] ${label} 네트워크 오류 (${elapsed}s): ${msg}`);
+        resultsArr[i] = { index: i, markdown: '', html: '', error: msg };
       }
-    } catch (e) {
-      alert('분석 중 오류가 발생했습니다: ' + (e instanceof Error ? e.message : e));
-    } finally {
-      setLoading(false);
+
+      setProgress((prev) => ({ ...prev, done: prev.done + 1 }));
+      setResults(resultsArr.filter(Boolean));
     }
+
+    addLog(`🎉 전체 완료 — 총 ${(totalInput + totalOutput).toLocaleString()} 토큰 사용`);
+    if (totalInput + totalOutput > 0) {
+      const updated = addUsage(totalInput, totalOutput);
+      setUsage(updated);
+    }
+    setLoading(false);
   };
 
   const copyToClipboard = useCallback(async (index: number) => {
@@ -185,6 +272,7 @@ export default function Home() {
 
   const totalTokens = usage.inputTokens + usage.outputTokens;
   const costKRW = calcCostKRW(usage);
+  const fixed = isFixedStyle(presetStyle);
 
   return (
     <div style={{ maxWidth: 900, margin: '0 auto', padding: 20 }}>
@@ -210,6 +298,68 @@ export default function Home() {
         <span style={{ color: '#2563eb', fontWeight: 'bold' }}>비용: ₩{costKRW.toLocaleString()}</span>
       </div>
 
+      {/* 지문 개수 프리셋 */}
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 12, fontWeight: 600, color: '#555', display: 'block', marginBottom: 6 }}>
+          지문 개수 프리셋
+        </label>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {COUNT_PRESETS.map((n) => (
+            <button
+              key={n}
+              onClick={() => applyCountPreset(n)}
+              disabled={loading}
+              style={{
+                padding: '6px 14px',
+                border: '1.5px solid',
+                borderColor: passages.length === n && !fixed ? '#2563eb' : '#ccc',
+                background: passages.length === n && !fixed ? '#dbeafe' : 'white',
+                color: passages.length === n && !fixed ? '#1d4ed8' : '#333',
+                borderRadius: 6,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: loading ? 'default' : 'pointer',
+              }}
+            >
+              {n}개
+            </button>
+          ))}
+          <span style={{ alignSelf: 'center', color: '#888', fontSize: 12, marginLeft: 8 }}>
+            현재: <b>{passages.length}</b>개
+          </span>
+        </div>
+      </div>
+
+      {/* 지문 스타일 프리셋 */}
+      <div style={{ marginBottom: 20 }}>
+        <label style={{ fontSize: 12, fontWeight: 600, color: '#555', display: 'block', marginBottom: 6 }}>
+          지문 라벨 스타일
+        </label>
+        <select
+          value={presetStyle}
+          onChange={(e) => applyPresetStyle(e.target.value as PresetStyle)}
+          disabled={loading}
+          style={{
+            padding: '8px 12px',
+            border: '1.5px solid #ccc',
+            borderRadius: 6,
+            fontSize: 13,
+            background: 'white',
+            cursor: loading ? 'default' : 'pointer',
+            minWidth: 280,
+          }}
+        >
+          {Object.entries(PRESETS).map(([key, info]) => (
+            <option key={key} value={key}>{info.label}</option>
+          ))}
+        </select>
+        {fixed && (
+          <span style={{ marginLeft: 10, color: '#d97706', fontSize: 12 }}>
+            ⚠ 고정 21지문 — 개수/추가/삭제 잠금
+          </span>
+        )}
+      </div>
+
       {passages.map((p, idx) => (
         <div
           key={p.id}
@@ -221,8 +371,10 @@ export default function Home() {
           }}
         >
           <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-            <span style={{ fontWeight: 'bold' }}>지문 {idx + 1}</span>
-            {passages.length > 1 && (
+            <span style={{ fontWeight: 'bold' }}>
+              {p.number ? p.number : `지문 ${idx + 1}`}
+            </span>
+            {!fixed && passages.length > 1 && (
               <button onClick={() => removePassage(p.id)} style={{ marginLeft: 'auto', color: 'red', cursor: 'pointer' }}>
                 삭제
               </button>
@@ -253,12 +405,15 @@ export default function Home() {
       ))}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 24 }}>
-        <button
-          onClick={addPassage}
-          style={{ padding: '8px 16px', border: '1px solid #333', borderRadius: 4, cursor: 'pointer' }}
-        >
-          + 지문 추가
-        </button>
+        {!fixed && (
+          <button
+            onClick={addPassage}
+            disabled={loading}
+            style={{ padding: '8px 16px', border: '1px solid #333', borderRadius: 4, cursor: loading ? 'default' : 'pointer' }}
+          >
+            + 지문 추가
+          </button>
+        )}
         <button
           onClick={analyze}
           disabled={loading}
@@ -271,9 +426,69 @@ export default function Home() {
             cursor: loading ? 'default' : 'pointer',
           }}
         >
-          {loading ? '분석 중...' : '분석하기'}
+          {loading ? `분석 중... (${progress.done}/${progress.total})` : '분석하기'}
         </button>
       </div>
+
+      {logs.length > 0 && (
+        <div style={{
+          marginBottom: 20,
+          padding: 12,
+          background: '#1e1e1e',
+          color: '#e0e0e0',
+          borderRadius: 8,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+          fontSize: 12,
+          lineHeight: 1.6,
+          maxHeight: 260,
+          overflowY: 'auto',
+          border: '1px solid #333',
+        }}>
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: 8,
+            paddingBottom: 8,
+            borderBottom: '1px solid #444',
+            position: 'sticky',
+            top: 0,
+            background: '#1e1e1e',
+          }}>
+            <span style={{ color: '#4ade80', fontWeight: 'bold' }}>
+              📋 진행 로그 {loading && `(${progress.done}/${progress.total})`}
+            </span>
+            {!loading && (
+              <button
+                onClick={() => setLogs([])}
+                style={{
+                  background: 'transparent',
+                  color: '#888',
+                  border: '1px solid #555',
+                  padding: '2px 8px',
+                  borderRadius: 4,
+                  fontSize: 11,
+                  cursor: 'pointer',
+                }}
+              >
+                지우기
+              </button>
+            )}
+          </div>
+          {logs.map((log, i) => (
+            <div key={i} style={{
+              color: log.includes('❌') ? '#f87171' :
+                     log.includes('✅') ? '#4ade80' :
+                     log.includes('🎉') ? '#fbbf24' :
+                     log.includes('🚀') ? '#60a5fa' : '#e0e0e0',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}>
+              {log}
+            </div>
+          ))}
+        </div>
+      )}
 
       {results.length > 0 && (
         <div>
@@ -301,9 +516,8 @@ export default function Home() {
               <div key={r.index} style={{ marginBottom: 12, border: '1px solid #e5e5e5', borderRadius: 8, overflow: 'hidden' }}>
                 <div style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', background: '#f9f9f9' }}>
                   <span style={{ fontWeight: 'bold', flex: 1 }}>
-                    지문 {r.index + 1}
+                    {passages[r.index]?.number || `지문 ${r.index + 1}`}
                     {passages[r.index]?.textbook && ` - ${passages[r.index].textbook}`}
-                    {passages[r.index]?.number && ` ${passages[r.index].number}`}
                   </span>
                   <button
                     onClick={() => copyToClipboard(r.index)}
