@@ -18,6 +18,22 @@ interface AnalysisResult {
   error?: string;
 }
 
+interface LogEntry {
+  id: string;
+  ts: string;
+  msg: string;
+  type: 'info' | 'progress' | 'success' | 'error' | 'complete';
+  startTime?: number; // progress 타입일 때 경과 시간 계산용
+  label?: string;     // 진행 중일 때 동적으로 재구성
+  index?: number;     // 지문 번호 (1-based)
+  total?: number;     // 전체 개수
+}
+
+// 경과 시간 기반 추정 % (5~7초 평균 기준, 95% 상한)
+function estimatePercent(elapsedMs: number): number {
+  return Math.min(95, Math.round((elapsedMs / 6000) * 100));
+}
+
 interface MonthlyUsage {
   month: string;
   inputTokens: number;
@@ -66,16 +82,29 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState<number | null>(null);
   const [usage, setUsage] = useState<MonthlyUsage>({ month: '', inputTokens: 0, outputTokens: 0 });
-  const [logs, setLogs] = useState<string[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [progress, setProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
+  const [, setTick] = useState(0); // 진행 중 지문의 경과 시간 실시간 갱신용
 
   useEffect(() => {
     setUsage(getUsage());
   }, []);
 
-  const addLog = (msg: string) => {
-    const ts = new Date().toLocaleTimeString('ko-KR', { hour12: false });
-    setLogs((prev) => [...prev, `[${ts}] ${msg}`]);
+  // loading 중에는 200ms 주기로 리렌더 (진행 중 지문의 경과 시간/%% 갱신)
+  useEffect(() => {
+    if (!loading) return;
+    const id = setInterval(() => setTick((t) => t + 1), 200);
+    return () => clearInterval(id);
+  }, [loading]);
+
+  const nowTs = () => new Date().toLocaleTimeString('ko-KR', { hour12: false });
+
+  const pushLog = (entry: Omit<LogEntry, 'ts'>) => {
+    setLogs((prev) => [...prev, { ...entry, ts: nowTs() }]);
+  };
+
+  const updateLog = (id: string, patch: Partial<LogEntry>) => {
+    setLogs((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
   };
 
   // 지문 수 변경 시: 부족하면 추가, 넘치면 잘라냄. 스타일 라벨 자동 주입.
@@ -153,18 +182,31 @@ export default function Home() {
     setResults([]);
     setLogs([]);
     setProgress({ done: 0, total: valid.length });
-    addLog(`🚀 분석 시작 — 지문 ${valid.length}개 (순차 처리, 429 방지)`);
+    pushLog({
+      id: 'start',
+      msg: `🚀 분석 시작 — 지문 ${valid.length}개 (병렬 3개 처리, gemini-2.5-flash)`,
+      type: 'info',
+    });
 
     const resultsArr: AnalysisResult[] = new Array(valid.length);
     let totalInput = 0;
     let totalOutput = 0;
 
-    // 지문 1개씩 순차 처리 — Dynamic Shared Quota 스파이크 완전 회피
-    for (let i = 0; i < valid.length; i++) {
-      const p = valid[i];
+    const processOne = async (p: PassageInput, i: number) => {
       const label = (p.textbook || p.number) ? `${p.textbook || ''} ${p.number || ''}`.trim() : `지문 ${i + 1}`;
-      addLog(`📝 [${i + 1}/${valid.length}] ${label} 분석 시작...`);
+      const logId = `task-${i}`;
       const startTime = Date.now();
+
+      // 진행 중 로그 엔트리 등록 (경과시간/%는 렌더 시점에 동적 계산)
+      pushLog({
+        id: logId,
+        msg: '',
+        type: 'progress',
+        startTime,
+        label,
+        index: i + 1,
+        total: valid.length,
+      });
 
       try {
         const res = await fetch('/api/analyze', {
@@ -180,11 +222,17 @@ export default function Home() {
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
         if (data.error) {
-          addLog(`❌ [${i + 1}/${valid.length}] ${label} 실패 (${elapsed}s): ${String(data.error).slice(0, 100)}`);
+          updateLog(logId, {
+            type: 'error',
+            msg: `❌ [${i + 1}/${valid.length}] ${label} 실패 (${elapsed}s): ${String(data.error).slice(0, 100)}`,
+          });
           resultsArr[i] = { index: i, markdown: '', html: '', error: data.error };
         } else {
           const tokens = (data.inputTokens || 0) + (data.outputTokens || 0);
-          addLog(`✅ [${i + 1}/${valid.length}] ${label} 완료 (${elapsed}s, ${tokens.toLocaleString()} 토큰)`);
+          updateLog(logId, {
+            type: 'success',
+            msg: `✅ [${i + 1}/${valid.length}] ${label} 완료 (${elapsed}s, ${tokens.toLocaleString()} 토큰)`,
+          });
           resultsArr[i] = {
             index: i,
             markdown: data.markdown,
@@ -196,15 +244,33 @@ export default function Home() {
       } catch (e) {
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         const msg = e instanceof Error ? e.message : 'Unknown';
-        addLog(`❌ [${i + 1}/${valid.length}] ${label} 네트워크 오류 (${elapsed}s): ${msg}`);
+        updateLog(logId, {
+          type: 'error',
+          msg: `❌ [${i + 1}/${valid.length}] ${label} 네트워크 오류 (${elapsed}s): ${msg}`,
+        });
         resultsArr[i] = { index: i, markdown: '', html: '', error: msg };
       }
 
       setProgress((prev) => ({ ...prev, done: prev.done + 1 }));
       setResults(resultsArr.filter(Boolean));
-    }
+    };
 
-    addLog(`🎉 전체 완료 — 총 ${(totalInput + totalOutput).toLocaleString()} 토큰 사용`);
+    // 병렬 3개 제한 (worker pool)
+    let nextIdx = 0;
+    const worker = async () => {
+      while (true) {
+        const idx = nextIdx++;
+        if (idx >= valid.length) return;
+        await processOne(valid[idx], idx);
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+
+    pushLog({
+      id: 'complete',
+      msg: `🎉 전체 완료 — 총 ${(totalInput + totalOutput).toLocaleString()} 토큰 사용`,
+      type: 'complete',
+    });
     if (totalInput + totalOutput > 0) {
       const updated = addUsage(totalInput, totalOutput);
       setUsage(updated);
@@ -475,18 +541,33 @@ export default function Home() {
               </button>
             )}
           </div>
-          {logs.map((log, i) => (
-            <div key={i} style={{
-              color: log.includes('❌') ? '#f87171' :
-                     log.includes('✅') ? '#4ade80' :
-                     log.includes('🎉') ? '#fbbf24' :
-                     log.includes('🚀') ? '#60a5fa' : '#e0e0e0',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-            }}>
-              {log}
-            </div>
-          ))}
+          {logs.map((log) => {
+            // progress 타입은 렌더 시점에 경과시간/% 동적 계산
+            let displayMsg = log.msg;
+            if (log.type === 'progress' && log.startTime) {
+              const elapsedMs = Date.now() - log.startTime;
+              const elapsedSec = (elapsedMs / 1000).toFixed(1);
+              const pct = estimatePercent(elapsedMs);
+              displayMsg = `⏳ [${log.index}/${log.total}] ${log.label} 분석 중... ${pct}% (${elapsedSec}s)`;
+            }
+            const color =
+              log.type === 'error' ? '#f87171' :
+              log.type === 'success' ? '#4ade80' :
+              log.type === 'complete' ? '#fbbf24' :
+              log.type === 'info' ? '#60a5fa' :
+              log.type === 'progress' ? '#fcd34d' :
+              '#e0e0e0';
+            return (
+              <div key={log.id} style={{
+                color,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}>
+                <span style={{ color: '#666', marginRight: 6 }}>[{log.ts}]</span>
+                {displayMsg}
+              </div>
+            );
+          })}
         </div>
       )}
 
