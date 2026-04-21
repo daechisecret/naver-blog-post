@@ -2,14 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { SYSTEM_PROMPT, buildUserPrompt } from '@/lib/prompt';
 
-async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 5000): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, retries = 4, delay = 5000): Promise<T> {
   for (let i = 0; i < retries; i++) {
     try {
       return await fn();
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : '';
-      if (message.includes('429') && i < retries - 1) {
-        await new Promise(r => setTimeout(r, delay * (i + 1)));
+      const isRetryable = message.includes('429') || message.includes('503') || message.includes('500');
+      if (isRetryable && i < retries - 1) {
+        // 지수 백오프: 5s → 10s → 20s → 40s
+        await new Promise(r => setTimeout(r, delay * Math.pow(2, i)));
         continue;
       }
       throw e;
@@ -42,6 +44,9 @@ export async function POST(req: NextRequest) {
   for (let i = 0; i < passages.length; i++) {
     const p = passages[i];
     if (!p.text.trim()) continue;
+
+    // 무료 티어 RPM 제한(15 RPM) 회피: 첫 요청 제외 4.5초 간격
+    if (i > 0) await new Promise(r => setTimeout(r, 4500));
 
     try {
       const userPrompt = buildUserPrompt(p.text, p.textbook, p.number);
