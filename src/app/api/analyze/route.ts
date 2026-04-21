@@ -20,6 +20,29 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 4, delay = 5000): Pr
   throw new Error('Max retries exceeded');
 }
 
+// Dynamic Shared Quota 스파이크 회피: 최대 N개만 동시 실행
+async function processWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIdx = 0;
+  async function worker() {
+    while (true) {
+      const idx = nextIdx++;
+      if (idx >= items.length) return;
+      results[idx] = await fn(items[idx], idx);
+    }
+  }
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    () => worker(),
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 export async function POST(req: NextRequest) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'your-api-key-here') {
@@ -37,36 +60,34 @@ export async function POST(req: NextRequest) {
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-  // 모든 지문을 병렬로 처리 — Paid Tier의 2000 RPM 한도 내에서 문제 없음
-  const processed = await Promise.all(
-    passages.map(async (p, i) => {
-      if (!p.text.trim()) return null;
-      try {
-        const userPrompt = buildUserPrompt(p.text, p.textbook, p.number);
-        const result = await withRetry(() =>
-          model.generateContent({
-            contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-            systemInstruction: { role: 'model', parts: [{ text: SYSTEM_PROMPT }] },
-          })
-        );
-        const response = result.response;
-        return {
-          index: i,
-          markdown: response.text(),
-          inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
-          outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
-        };
-      } catch (e: unknown) {
-        return {
-          index: i,
-          markdown: '',
-          error: e instanceof Error ? e.message : 'Unknown error',
-          inputTokens: 0,
-          outputTokens: 0,
-        };
-      }
-    })
-  );
+  // 동시 실행 3개 제한 — Dynamic Shared Quota 스파이크 방지로 429 감소
+  const processed = await processWithConcurrency(passages, 3, async (p, i) => {
+    if (!p.text.trim()) return null;
+    try {
+      const userPrompt = buildUserPrompt(p.text, p.textbook, p.number);
+      const result = await withRetry(() =>
+        model.generateContent({
+          contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+          systemInstruction: { role: 'model', parts: [{ text: SYSTEM_PROMPT }] },
+        })
+      );
+      const response = result.response;
+      return {
+        index: i,
+        markdown: response.text(),
+        inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
+        outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
+      };
+    } catch (e: unknown) {
+      return {
+        index: i,
+        markdown: '',
+        error: e instanceof Error ? e.message : 'Unknown error',
+        inputTokens: 0,
+        outputTokens: 0,
+      };
+    }
+  });
 
   const filtered = processed.filter((r): r is NonNullable<typeof r> => r !== null);
   const totalInputTokens = filtered.reduce((s, r) => s + r.inputTokens, 0);
