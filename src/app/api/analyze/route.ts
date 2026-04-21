@@ -38,7 +38,9 @@ export async function POST(req: NextRequest) {
   }
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+  // gemini-2.5-flash로 교체 — 2.0은 유료 티어에서도 DSQ 할당이 작아 429 빈발
+  // 2.5는 신모델이라 할당 넉넉, 같은 가격($0.15/$0.60), 성능도 업그레이드
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
   try {
     const userPrompt = buildUserPrompt(passage, textbook, number);
