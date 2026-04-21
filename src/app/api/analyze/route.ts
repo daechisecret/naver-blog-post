@@ -37,40 +37,41 @@ export async function POST(req: NextRequest) {
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-  const results: { index: number; markdown: string; error?: string }[] = [];
-  let totalInputTokens = 0;
-  let totalOutputTokens = 0;
-
-  for (let i = 0; i < passages.length; i++) {
-    const p = passages[i];
-    if (!p.text.trim()) continue;
-
-    // 무료 티어 RPM 제한(15 RPM) 회피: 첫 요청 제외 4.5초 간격
-    if (i > 0) await new Promise(r => setTimeout(r, 4500));
-
-    try {
-      const userPrompt = buildUserPrompt(p.text, p.textbook, p.number);
-      const result = await withRetry(() =>
-        model.generateContent({
-          contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-          systemInstruction: { role: 'model', parts: [{ text: SYSTEM_PROMPT }] },
-        })
-      );
-      const response = result.response;
-      const text = response.text();
-
-      const usage = response.usageMetadata;
-      if (usage) {
-        totalInputTokens += usage.promptTokenCount ?? 0;
-        totalOutputTokens += usage.candidatesTokenCount ?? 0;
+  // 모든 지문을 병렬로 처리 — Paid Tier의 2000 RPM 한도 내에서 문제 없음
+  const processed = await Promise.all(
+    passages.map(async (p, i) => {
+      if (!p.text.trim()) return null;
+      try {
+        const userPrompt = buildUserPrompt(p.text, p.textbook, p.number);
+        const result = await withRetry(() =>
+          model.generateContent({
+            contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+            systemInstruction: { role: 'model', parts: [{ text: SYSTEM_PROMPT }] },
+          })
+        );
+        const response = result.response;
+        return {
+          index: i,
+          markdown: response.text(),
+          inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
+          outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
+        };
+      } catch (e: unknown) {
+        return {
+          index: i,
+          markdown: '',
+          error: e instanceof Error ? e.message : 'Unknown error',
+          inputTokens: 0,
+          outputTokens: 0,
+        };
       }
+    })
+  );
 
-      results.push({ index: i, markdown: text });
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : 'Unknown error';
-      results.push({ index: i, markdown: '', error: message });
-    }
-  }
+  const filtered = processed.filter((r): r is NonNullable<typeof r> => r !== null);
+  const totalInputTokens = filtered.reduce((s, r) => s + r.inputTokens, 0);
+  const totalOutputTokens = filtered.reduce((s, r) => s + r.outputTokens, 0);
+  const results = filtered.map(({ inputTokens: _i, outputTokens: _o, ...rest }) => rest);
 
   return NextResponse.json({
     results,
